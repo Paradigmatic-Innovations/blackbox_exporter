@@ -1,0 +1,44 @@
+# blackbox_exporter with `http.spki_pins`
+# (https://github.com/prometheus/blackbox_exporter/pull/1679), built from this
+# checkout by .github/workflows/blackbox-exporter-spki.yaml and deployed by DocPad_IaC
+# (helm/grafana-cloud/blackbox-exporter-values.yaml). Alloy's built-in
+# prometheus.exporter.blackbox cannot pin until that PR is merged and Alloy
+# picks it up; drop this image then (DOC-8226).
+#
+# Kept separate from the upstream Dockerfile so this branch rebases cleanly.
+
+FROM golang:1.25-alpine AS build
+
+# Commit being built; the workflow passes the pushed SHA.
+ARG REVISION
+
+# ca-certificates: the latest Alpine bundle is copied into the runtime image.
+# spki_pins only match roots in the verified chain, so the bundle must be
+# recent enough to contain Let's Encrypt Root YR (the primary pin).
+RUN apk add --no-cache ca-certificates
+
+WORKDIR /src
+COPY . .
+
+# -buildvcs=false: the revision comes from REVISION, so the build does not
+# need git or depend on the state of .git in the build context.
+RUN CGO_ENABLED=0 go build -trimpath -buildvcs=false \
+      -ldflags "-s -w \
+        -X github.com/prometheus/common/version.Version=0.28.0-spki-pins \
+        -X github.com/prometheus/common/version.Revision=${REVISION:?} \
+        -X github.com/prometheus/common/version.Branch=main" \
+      -o /out/blackbox_exporter .
+
+FROM gcr.io/distroless/static-debian12:nonroot
+
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=build /out/blackbox_exporter /bin/blackbox_exporter
+
+EXPOSE 9115
+# No USER instruction is needed, so the two Semgrep findings below are false
+# positives: the :nonroot tag of the distroless base image already sets
+# USER 65532 (nonroot), and Semgrep only looks for USER in this file.
+# nosemgrep: missing-user-entrypoint -- base image is already non-root (see above)
+ENTRYPOINT ["/bin/blackbox_exporter"]
+# nosemgrep: missing-user -- base image is already non-root (see above)
+CMD ["--config.file=/etc/blackbox_exporter/config.yml"]
